@@ -15,12 +15,13 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"time"
 
 	"github.com/dchest/uniuri"
 	"github.com/prometheus/client_golang/prometheus"
@@ -39,17 +40,17 @@ var (
 	ping = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "ping"),
 		"Latency (ms)",
-		nil, nil,
+		[]string{"ip"}, nil,
 	)
 	download = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "download"),
 		"Download bandwidth (Mbps).",
-		nil, nil,
+		[]string{"ip"}, nil,
 	)
 	upload = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "upload"),
 		"Upload bandwidth (Mbps).",
-		nil, nil,
+		[]string{"ip"}, nil,
 	)
 )
 
@@ -60,8 +61,8 @@ type Exporter struct {
 }
 
 // NewExporter returns an initialized Exporter.
-func NewExporter(config string, server string, interval time.Duration) (*Exporter, error) {
-	log.Infof("Setup Speedtest client with interval %s", interval)
+func NewExporter(config string, server string) (*Exporter, error) {
+	log.Info("Setup Speedtest client")
 	client, err := speedtest.NewClient(config, server)
 	if err != nil {
 		return nil, fmt.Errorf("Can't create the Speedtest client: %s", err)
@@ -91,10 +92,16 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
+	ip, err := checkIP()
+	if err != nil {
+		log.Errorf("Error getting IP address: %s", err)
+		ip = "unknown"
+	}
+
 	metrics := e.Client.NetworkMetrics()
-	ch <- prometheus.MustNewConstMetric(ping, prometheus.GaugeValue, metrics["ping"])
-	ch <- prometheus.MustNewConstMetric(download, prometheus.GaugeValue, metrics["download"])
-	ch <- prometheus.MustNewConstMetric(upload, prometheus.GaugeValue, metrics["upload"])
+	ch <- prometheus.MustNewConstMetric(ping, prometheus.GaugeValue, metrics["ping"], ip)
+	ch <- prometheus.MustNewConstMetric(download, prometheus.GaugeValue, metrics["download"], ip)
+	ch <- prometheus.MustNewConstMetric(upload, prometheus.GaugeValue, metrics["upload"], ip)
 	log.Infof("Speedtest exporter finished")
 }
 
@@ -109,7 +116,6 @@ func main() {
 		metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
 		configURL     = flag.String("speedtest.config-url", "http://c.speedtest.net/speedtest-config.php?x="+uniuri.New(), "Speedtest configuration URL")
 		serverURL     = flag.String("speedtest.server-url", "http://c.speedtest.net/speedtest-servers-static.php?x="+uniuri.New(), "Speedtest server URL")
-		//interval      = flag.Int("interval", 60*time.Second, "Interval for metrics.")
 	)
 	flag.Parse()
 
@@ -121,8 +127,7 @@ func main() {
 	log.Infoln("Starting speedtest exporter", prom_version.Info())
 	log.Infoln("Build context", prom_version.BuildContext())
 
-	interval := 60 * time.Second
-	exporter, err := NewExporter(*configURL, *serverURL, interval)
+	exporter, err := NewExporter(*configURL, *serverURL)
 	if err != nil {
 		log.Errorf("Can't create exporter : %s", err)
 		os.Exit(1)
@@ -143,4 +148,21 @@ func main() {
 
 	log.Infoln("Listening on", *listenAddress)
 	log.Fatal(http.ListenAndServe(*listenAddress, nil))
+}
+
+// checkIP gets the current external IP address.
+// From: https://www.reddit.com/r/golang/comments/3l71g4/help_function_to_return_the_users_external_ip/cv3pj7r/
+func checkIP() (string, error) {
+	rsp, err := http.Get("http://checkip.amazonaws.com")
+	if err != nil {
+		return "", err
+	}
+	defer rsp.Body.Close()
+
+	buf, err := ioutil.ReadAll(rsp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return string(bytes.TrimSpace(buf)), nil
 }
